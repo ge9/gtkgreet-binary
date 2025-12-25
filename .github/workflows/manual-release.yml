@@ -1,0 +1,93 @@
+name: Manual release
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Commit SHA / branch / existing tag to build from"
+        required: true
+      tag:
+        description: "New tag name (leave empty to use existing tag in ref)"
+        required: false
+
+permissions:
+  contents: write   # tag push + release 作成に必要
+
+jobs:
+  build-release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout source ref
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0
+
+      - name: Setup Zig
+        uses: Rul1an/zig-cross-compile-action@v1
+        with:
+          version: 0.13.0
+          target: x86_64-linux-gnu.2.3
+      - name: Setup build deps
+        run: |
+          sudo apt update
+          sudo apt install -y libjson-c-dev libgtk-3-dev libgtk-layer-shell-dev
+          pip install meson
+          git clone https://github.com/ge9/zig-gcc-wrapper "$RUNNER_TEMP/zig-gcc-wrapper"
+          echo "$RUNNER_TEMP/zig-gcc-wrapper" >> "$GITHUB_PATH"
+      - name: meson zig patch
+        run: |
+          which meson
+          SITE_PACKAGES=$(echo "import site;print(site.getsitepackages()[0])" | python -)
+          curl -fsSL \
+          https://github.com/mesonbuild/meson/commit/be84dc8cf2039406f3192255f5156635313477c2.patch \
+          | git apply \
+          --directory="$SITE_PACKAGES" \
+          --include="mesonbuild/linkers/detect.py"
+      - name: Build
+        run: |
+          zigbuild 2.3 meson setup build
+          cd build
+          zigbuild 2.3 ninja
+      - name: Decide tag name
+        id: vars
+        run: |
+          REF=${{ inputs.ref }}
+          if [ -n "${{ inputs.tag }}" ]; then
+            echo "TAG=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            case $REF in
+                ????????????????????????????????????????) # length=40, maybe commit hash
+                    echo $REF
+                    REF1=commit-${REF%${REF#???????}}
+                    echo $REF1
+                    ;;
+                *)
+                    REF1=$REF
+                    echo "CREATE_TAG=no" >> "$GITHUB_OUTPUT"
+                    ;;
+            esac
+            echo "TAG=$REF1" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create and push tag
+        if: steps.vars.outputs.CREATE_TAG != 'no'
+        run: |
+          git tag "${{ steps.vars.outputs.TAG }}"
+          git push origin "${{ steps.vars.outputs.TAG }}"
+
+      - name: Checkout tag
+        run: |
+          git checkout "${{ steps.vars.outputs.TAG }}"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.vars.outputs.TAG }}
+          name: Release ${{ steps.vars.outputs.TAG }}
+          draft: false
+          prerelease: false
+          files: |
+            build/gtkgreet/gtkgreet
+            
